@@ -1,0 +1,16 @@
+{
+  "name": "boring-daemon",
+  "version": "0.1.0",
+  "description": "MCP server for terminal control — send commands, read output, wait for readiness",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-reporter spec test/*.test.js",
+    "test:unit": "node --test --test-reporter spec test/session-manager.unit.test.js",
+    "test:integration": "node --test --test-reporter spec test/session-manager.integration.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}
