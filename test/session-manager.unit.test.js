@@ -565,6 +565,23 @@ describe("SessionManager — unit tests", () => {
       assert.equal(result.ready, true);
     });
 
+    it("returns ready=true via bracket paste mode signal for custom REPL prompts", async () => {
+      manager._exec = mock.fn(async (args) => {
+        if (args[0] === "display-message") return "ruby\n";
+        if (args[0] === "capture-pane") {
+          // -e flag returns raw escape sequences
+          if (args.includes("-e")) {
+            return "some output\n\x1b[?2004h\x1b[?25lats(staging)> \x1b[?25h";
+          }
+          return "some output\nats(staging)> ";
+        }
+        return "";
+      });
+
+      const result = await manager.waitForReady("any", { timeout: 2 });
+      assert.equal(result.ready, true);
+    });
+
     it("returns ready=false on timeout when command is running and no prompt match", async () => {
       manager._exec = mock.fn(async (args) => {
         if (args[0] === "display-message") return "sleep\n";

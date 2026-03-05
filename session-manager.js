@@ -276,16 +276,30 @@ export class SessionManager {
       // This is far more reliable than regex matching on prompt text.
       const shellIdle = await this._isShellIdle(fullName);
 
-      // Fallback signal: regex match on last line (for REPLs like irb, psql, python)
-      let regexMatch = false;
+      // Fallback signals for REPLs (not idle shells):
+      // 1. Bracket paste mode (\e[?2004h) — readline emits this when ready for input
+      // 2. Regex match on last line — for known REPL prompt patterns
+      let replReady = false;
       if (!shellIdle) {
-        const screen = await this._exec(["capture-pane", "-t", fullName, "-p"]);
-        const trimmed = screen.trimEnd();
-        const lastLine = trimmed.split("\n").pop() || "";
-        regexMatch = pattern.test(lastLine);
+        const rawScreen = await this._exec([
+          "capture-pane",
+          "-t",
+          fullName,
+          "-p",
+          "-e",
+        ]);
+        const trimmedRaw = rawScreen.trimEnd();
+        const lastRawLine = trimmedRaw.split("\n").pop() || "";
+        const bracketPaste = lastRawLine.includes("\x1b[?2004h");
+
+        // Strip ANSI for regex matching on clean text
+        const lastLine = this._stripAnsi(lastRawLine);
+        const regexMatch = pattern.test(lastLine);
+
+        replReady = bracketPaste || regexMatch;
       }
 
-      if (shellIdle || regexMatch) {
+      if (shellIdle || replReady) {
         // Terminal is ready — return output since last command
         let output = "";
         if (session) {

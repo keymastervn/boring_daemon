@@ -9,7 +9,7 @@ const manager = new SessionManager();
 
 const server = new McpServer({
   name: "boring-daemon",
-  version: "0.2.0",
+  version: "0.2.1",
 });
 
 // --- Tools ---
