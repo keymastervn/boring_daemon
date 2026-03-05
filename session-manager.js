@@ -6,12 +6,32 @@ import { join } from "path";
 const SESSION_PREFIX = "bd-";
 const LOG_DIR = join(homedir(), ".boring_daemon", "logs");
 
-// Common prompt patterns
+// Shells that indicate the terminal is idle when they appear as pane_current_command
+const IDLE_SHELLS = new Set([
+  "bash",
+  "zsh",
+  "fish",
+  "sh",
+  "dash",
+  "ksh",
+  "csh",
+  "tcsh",
+  "ash",
+  "login",
+  "-bash",
+  "-zsh",
+  "-fish",
+  "-sh",
+]);
+
+// Fallback prompt patterns (used when pane_current_command is not a shell,
+// e.g. inside a REPL like irb, pry, python, psql)
 const DEFAULT_PROMPT_PATTERN =
-  "(\\$|#|>|%|❯|➜)\\s*.*$|" + // shell prompts (including oh-my-zsh arrow)
+  "(\\$|#|>|%|❯|➜)\\s*.*$|" + // shell prompts
   "irb.*[>*]\\s*$|" + // ruby irb
   "pry.*[>*]\\s*$|" + // pry
   ">>>\\s*$|" + // python
+  "In\\s*\\[\\d+\\]:\\s*$|" + // ipython / jupyter
   "iex.*>\\s*$|" + // elixir
   "mysql>\\s*$|" + // mysql
   "postgres.*[#>]\\s*$"; // postgres
@@ -224,6 +244,22 @@ export class SessionManager {
     return this._stripAnsi(output);
   }
 
+  // Check if the pane's current command indicates an idle shell
+  async _isShellIdle(tmuxTarget) {
+    try {
+      const cmd = await this._exec([
+        "display-message",
+        "-t",
+        tmuxTarget,
+        "-p",
+        "#{pane_current_command}",
+      ]);
+      return IDLE_SHELLS.has(cmd.trim());
+    } catch {
+      return false;
+    }
+  }
+
   async waitForReady(name, { timeout = 30, promptPattern } = {}) {
     const session = this.sessions.get(name);
     const pattern = new RegExp(
@@ -236,13 +272,20 @@ export class SessionManager {
     const timeoutMs = timeout * 1000;
 
     while (Date.now() - startTime < timeoutMs) {
-      // Check the last line of the pane
-      const screen = await this._exec(["capture-pane", "-t", fullName, "-p"]);
+      // Primary signal: check if the pane is running an idle shell
+      // This is far more reliable than regex matching on prompt text.
+      const shellIdle = await this._isShellIdle(fullName);
 
-      const trimmed = screen.trimEnd();
-      const lastLine = trimmed.split("\n").pop() || "";
+      // Fallback signal: regex match on last line (for REPLs like irb, psql, python)
+      let regexMatch = false;
+      if (!shellIdle) {
+        const screen = await this._exec(["capture-pane", "-t", fullName, "-p"]);
+        const trimmed = screen.trimEnd();
+        const lastLine = trimmed.split("\n").pop() || "";
+        regexMatch = pattern.test(lastLine);
+      }
 
-      if (pattern.test(lastLine)) {
+      if (shellIdle || regexMatch) {
         // Terminal is ready — return output since last command
         let output = "";
         if (session) {
@@ -250,10 +293,22 @@ export class SessionManager {
             const content = readFileSync(session.logFile, "utf-8");
             output = content.slice(session.commandOffset);
           } catch {
-            output = trimmed;
+            const screen = await this._exec([
+              "capture-pane",
+              "-t",
+              fullName,
+              "-p",
+            ]);
+            output = screen.trimEnd();
           }
         } else {
-          output = trimmed;
+          const screen = await this._exec([
+            "capture-pane",
+            "-t",
+            fullName,
+            "-p",
+          ]);
+          output = screen.trimEnd();
         }
         return {
           ready: true,

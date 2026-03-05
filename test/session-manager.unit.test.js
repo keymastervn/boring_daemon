@@ -490,16 +490,58 @@ describe("SessionManager — unit tests", () => {
     });
   });
 
+  // --- _isShellIdle (mocked) ---
+
+  describe("_isShellIdle", () => {
+    it("returns true for common shells", async () => {
+      for (const shell of [
+        "zsh",
+        "bash",
+        "fish",
+        "sh",
+        "dash",
+        "-zsh",
+        "-bash",
+        "login",
+      ]) {
+        manager._exec = mock.fn(async () => shell + "\n");
+        assert.equal(
+          await manager._isShellIdle("any"),
+          true,
+          `${shell} should be idle`,
+        );
+      }
+    });
+
+    it("returns false for running commands", async () => {
+      for (const cmd of ["sleep", "ruby", "python3", "node", "psql", "ssh"]) {
+        manager._exec = mock.fn(async () => cmd + "\n");
+        assert.equal(
+          await manager._isShellIdle("any"),
+          false,
+          `${cmd} should not be idle`,
+        );
+      }
+    });
+
+    it("returns false on error", async () => {
+      manager._exec = mock.fn(async () => {
+        throw new Error("no session");
+      });
+      assert.equal(await manager._isShellIdle("any"), false);
+    });
+  });
+
   // --- waitForReady (mocked) ---
 
   describe("waitForReady", () => {
-    it("returns ready=true when prompt detected immediately", async () => {
+    it("returns ready=true immediately when shell is idle (pane_current_command)", async () => {
       manager._exec = mock.fn(async (args) => {
+        if (args[0] === "display-message") return "zsh\n";
         if (args[0] === "capture-pane") return "output line\n$ ";
         return "";
       });
 
-      // Register a session
       manager.sessions.set("wr", {
         promptPattern: "\\$\\s*$",
         logFile: "/nonexistent",
@@ -511,8 +553,21 @@ describe("SessionManager — unit tests", () => {
       assert.equal(result.elapsed, 0);
     });
 
-    it("returns ready=false on timeout", async () => {
+    it("returns ready=true via regex fallback when command is not a shell (REPL)", async () => {
       manager._exec = mock.fn(async (args) => {
+        // pane_current_command = ruby (not idle shell)
+        if (args[0] === "display-message") return "ruby\n";
+        if (args[0] === "capture-pane") return "some output\nirb(main):001:0> ";
+        return "";
+      });
+
+      const result = await manager.waitForReady("any", { timeout: 2 });
+      assert.equal(result.ready, true);
+    });
+
+    it("returns ready=false on timeout when command is running and no prompt match", async () => {
+      manager._exec = mock.fn(async (args) => {
+        if (args[0] === "display-message") return "sleep\n";
         if (args[0] === "capture-pane") return "still running...";
         return "";
       });
@@ -530,17 +585,17 @@ describe("SessionManager — unit tests", () => {
 
     it("uses custom promptPattern override", async () => {
       manager._exec = mock.fn(async (args) => {
+        if (args[0] === "display-message") return "ruby\n";
         if (args[0] === "capture-pane") return "myapp> ";
         return "";
       });
 
       manager.sessions.set("cp", {
-        promptPattern: "\\$\\s*$", // default won't match
+        promptPattern: "\\$\\s*$",
         logFile: "/nonexistent",
         commandOffset: 0,
       });
 
-      // Override with pattern that matches
       const result = await manager.waitForReady("cp", {
         timeout: 2,
         promptPattern: "myapp>",
@@ -548,10 +603,8 @@ describe("SessionManager — unit tests", () => {
       assert.equal(result.ready, true);
     });
 
-    it("detects various prompt formats", async () => {
+    it("detects various REPL prompts via regex fallback", async () => {
       const prompts = [
-        "user@host:~$ ",
-        "root@server:/# ",
         ">>> ",
         "irb(main):001:0> ",
         "pry(main)> ",
@@ -559,19 +612,22 @@ describe("SessionManager — unit tests", () => {
         "iex(1)> ",
         "mysql> ",
         "postgres=# ",
-        "➜  project ",
-        "❯ ",
+        "In [1]: ",
       ];
 
       for (const prompt of prompts) {
         manager._exec = mock.fn(async (args) => {
+          if (args[0] === "display-message") return "ruby\n"; // not a shell
           if (args[0] === "capture-pane") return `some output\n${prompt}`;
           return "";
         });
 
-        // Use default pattern (no session registered)
         const result = await manager.waitForReady("any", { timeout: 1 });
-        assert.equal(result.ready, true, `Should detect prompt: "${prompt}"`);
+        assert.equal(
+          result.ready,
+          true,
+          `Should detect REPL prompt: "${prompt}"`,
+        );
       }
     });
   });

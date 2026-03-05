@@ -120,7 +120,7 @@ Claude will create the session, launch psql, wait for the `postgres=>` prompt, r
 
 ## CLI commands
 
-The `boring-daemon` CLI helps you wrap existing terminal tabs for Claude to attach to.
+The `boring-daemon` CLI helps you manage terminal sessions.
 
 ```bash
 # Wrap current terminal in a named tmux session
@@ -128,6 +128,15 @@ npx boring-daemon wrap <name>
 
 # Detach from the tmux session (back to plain terminal)
 npx boring-daemon unwrap
+
+# List all tmux sessions
+npx boring-daemon list
+
+# Kill a specific session
+npx boring-daemon kill <name>
+
+# Kill all boring-daemon (bd-*) sessions
+npx boring-daemon kill-all
 ```
 
 After wrapping, tell Claude: `Attach to session "<name>"`.
@@ -263,10 +272,18 @@ Your shell prompt might not match the default pattern. Pass a custom `prompt_pat
 tmux new-session -d -s test && sleep 1 && tmux capture-pane -t test -p | od -c | tail -5 && tmux kill-session -t test
 ```
 
+**Model "corrects" commands instead of sending them verbatim**
+LLMs may rewrite unusual command names (e.g., `heroclistag` → `heroctl staging`) because they look like typos. The tool descriptions instruct the model to send commands exactly as written, but this isn't always enough. To reduce the risk:
+
+- Wrap commands in backticks in your prompt: `` run `heroclistag app run-tty ats` ``
+- Be explicit: "run this exact command: ..."
+- If the model still rewrites it, correct it and it will learn within the conversation
+
 **Stale sessions after a crash**
 List and kill orphaned sessions:
 
 ```bash
-tmux list-sessions | grep ^bd-
-tmux kill-session -t bd-<name>
+boring-daemon list
+boring-daemon kill <name>
+boring-daemon kill-all    # kills all bd-* sessions
 ```

@@ -9,7 +9,7 @@ const manager = new SessionManager();
 
 const server = new McpServer({
   name: "boring-daemon",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // --- Tools ---
@@ -101,7 +101,9 @@ server.tool(
     command: z
       .string()
       .optional()
-      .describe("Initial command to run (e.g. 'ssh prod', 'rails console')"),
+      .describe(
+        "Initial command to run, verbatim from the user (e.g. 'ssh prod', 'rails console'). Never correct or reformat.",
+      ),
     prompt_pattern: z
       .string()
       .optional()
@@ -136,10 +138,16 @@ server.tool(
 
 server.tool(
   "send_command",
-  "Send a command to a terminal session. The command is typed and Enter is pressed. Use wait_for_ready afterwards to get the output.",
+  `Send a command to a terminal session. The command is typed and Enter is pressed. Use wait_for_ready afterwards to get the output.
+
+CRITICAL: You MUST send commands EXACTLY as the user wrote them, character-for-character. NEVER "correct", reformat, or split user-provided commands. Users often use custom aliases, typo-looking tool names, or domain-specific CLIs that you won't recognize — these are intentional. If the user writes \`heroclistag app run-tty ats\`, send exactly that, not \`heroctl staging app run-tty ats\`. When in doubt, copy the command verbatim from the user's prompt.`,
   {
     session: z.string().describe("Session name"),
-    command: z.string().describe("Command to execute"),
+    command: z
+      .string()
+      .describe(
+        "The exact command string to type — must match the user's input verbatim, never corrected or reformatted",
+      ),
     enter: z
       .boolean()
       .optional()
