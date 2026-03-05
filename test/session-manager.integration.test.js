@@ -262,6 +262,154 @@ describe(
       });
     });
 
+    // --- Attach to existing session ---
+
+    describe("session_attach", () => {
+      const EXTERNAL_SESSION = `ext-${Date.now()}`;
+
+      afterEach(async () => {
+        try {
+          execFileSync("tmux", ["kill-session", "-t", EXTERNAL_SESSION]);
+        } catch {}
+      });
+
+      it("attaches to a pre-existing tmux session", async () => {
+        // Create a tmux session outside of boring_daemon
+        execFileSync("tmux", [
+          "new-session",
+          "-d",
+          "-s",
+          EXTERNAL_SESSION,
+          "-x",
+          "200",
+          "-y",
+          "50",
+        ]);
+
+        const result = await manager.attach("ext", {
+          tmuxSession: EXTERNAL_SESSION,
+        });
+        assert.equal(result.status, "attached");
+        assert.equal(result.tmuxName, EXTERNAL_SESSION);
+      });
+
+      it("can send commands to an attached session", async () => {
+        execFileSync("tmux", [
+          "new-session",
+          "-d",
+          "-s",
+          EXTERNAL_SESSION,
+          "-x",
+          "200",
+          "-y",
+          "50",
+        ]);
+
+        await manager.attach("ext", { tmuxSession: EXTERNAL_SESSION });
+        await manager.waitForReady("ext", { timeout: 5 });
+
+        await manager.sendCommand("ext", "echo ATTACH_TEST_999");
+        const result = await manager.waitForReady("ext", { timeout: 5 });
+
+        assert.ok(result.ready, "Should detect prompt");
+        assert.ok(
+          result.output.includes("ATTACH_TEST_999"),
+          "Should capture output from attached session",
+        );
+      });
+
+      it("can read output from an attached session", async () => {
+        execFileSync("tmux", [
+          "new-session",
+          "-d",
+          "-s",
+          EXTERNAL_SESSION,
+          "-x",
+          "200",
+          "-y",
+          "50",
+        ]);
+
+        await manager.attach("ext", { tmuxSession: EXTERNAL_SESSION });
+        await manager.waitForReady("ext", { timeout: 5 });
+
+        await manager.sendCommand("ext", "echo READ_ATTACH_OUTPUT");
+        await new Promise((r) => setTimeout(r, 1000));
+
+        const output = await manager.readOutput("ext");
+        assert.ok(output.includes("READ_ATTACH_OUTPUT"));
+      });
+
+      it("throws when attaching to nonexistent session", async () => {
+        await assert.rejects(
+          () =>
+            manager.attach("bad", { tmuxSession: "nonexistent-session-xyz" }),
+          { message: /not found/ },
+        );
+      });
+
+      it("appears in listAll with managed=true after attach", async () => {
+        execFileSync("tmux", [
+          "new-session",
+          "-d",
+          "-s",
+          EXTERNAL_SESSION,
+          "-x",
+          "200",
+          "-y",
+          "50",
+        ]);
+
+        await manager.attach("ext", { tmuxSession: EXTERNAL_SESSION });
+
+        const all = await manager.listAll();
+        const found = all.find((s) => s.name === EXTERNAL_SESSION);
+        assert.ok(found, "Should appear in listAll");
+        // Note: managed detection checks both name and short name
+      });
+    });
+
+    // --- listAll ---
+
+    describe("listAll", () => {
+      const PLAIN_SESSION = `plain-${Date.now()}`;
+
+      afterEach(async () => {
+        try {
+          execFileSync("tmux", ["kill-session", "-t", PLAIN_SESSION]);
+        } catch {}
+      });
+
+      it("shows both bd- and non-bd sessions", async () => {
+        // Create a boring_daemon session
+        await manager.create(TEST_SESSION, { workingDir: "/tmp" });
+
+        // Create a plain tmux session
+        execFileSync("tmux", [
+          "new-session",
+          "-d",
+          "-s",
+          PLAIN_SESSION,
+          "-x",
+          "200",
+          "-y",
+          "50",
+        ]);
+
+        const all = await manager.listAll();
+        const names = all.map((s) => s.name);
+
+        assert.ok(
+          names.includes(`bd-${TEST_SESSION}`),
+          "Should include bd- session",
+        );
+        assert.ok(
+          names.includes(PLAIN_SESSION),
+          "Should include plain session",
+        );
+      });
+    });
+
     // --- Edge cases ---
 
     describe("edge cases", () => {

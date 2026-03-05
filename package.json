@@ -4,6 +4,9 @@
   "description": "MCP server for terminal control — send commands, read output, wait for readiness",
   "main": "server.js",
   "type": "module",
+  "bin": {
+    "boring-daemon": "./cli.js"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node --test --test-reporter spec test/*.test.js",

@@ -1,6 +1,6 @@
 # boring_daemon
 
-An MCP server that gives Claude Code full terminal control — create sessions, send commands, read output, and wait for readiness. Like browser-use/CUA, but for CLI.
+An MCP server that gives Claude Code full terminal control — create sessions, attach to existing ones, send commands, read output, and wait for readiness. Like browser-use/CUA, but for CLI.
 
 Built on **tmux** for reliability: every session is a real tmux session you can attach to and watch in real-time.
 
@@ -14,16 +14,18 @@ Claude Code ←── stdio MCP ──→ boring_daemon (Node.js)
                                     └── tmux pipe-pane    → stream to log file
 ```
 
-Claude gets 6 tools:
+Claude gets 8 tools:
 
-| Tool             | Description                                                      |
-| ---------------- | ---------------------------------------------------------------- |
-| `session_create` | Spawn a new terminal session (optionally with a startup command) |
-| `session_list`   | List all active sessions                                         |
-| `send_command`   | Type a command + Enter into a session                            |
-| `send_keys`      | Send raw keystrokes (Ctrl-C, y/n, arrow keys)                    |
-| `read_output`    | Read the current screen or output since last command             |
-| `wait_for_ready` | Block until the prompt reappears, then return all output         |
+| Tool               | Description                                                       |
+| ------------------ | ----------------------------------------------------------------- |
+| `session_create`   | Spawn a new terminal session (optionally with a startup command)  |
+| `session_attach`   | Attach to an existing tmux session (e.g., one you already opened) |
+| `session_list`     | List sessions managed by boring_daemon                            |
+| `session_list_all` | List ALL tmux sessions on the system (to discover what to attach) |
+| `send_command`     | Type a command + Enter into a session                             |
+| `send_keys`        | Send raw keystrokes (Ctrl-C, y/n, arrow keys)                     |
+| `read_output`      | Read the current screen or output since last command              |
+| `wait_for_ready`   | Block until the prompt reappears, then return all output          |
 
 ## Use cases
 
@@ -31,6 +33,7 @@ Claude gets 6 tools:
 - Run and observe **database queries** through a CLI client
 - SSH into servers and execute operational tasks
 - Run **long-running processes** and monitor their output
+- **Attach to an existing terminal tab** and let Claude work inside it
 - Any interactive CLI workflow that needs back-and-forth
 
 ## Prerequisites
@@ -55,7 +58,7 @@ npm install
 
 This adds `boring-daemon` to your `~/.claude.json` MCP server config. Restart Claude Code after running this.
 
-### 3. Try it out
+### 3. Try it out — new session
 
 Start a conversation with Claude Code and ask it to use a terminal session:
 
@@ -76,6 +79,35 @@ You can watch what's happening live in another terminal:
 tmux attach -t bd-demo
 ```
 
+### 4. Try it out — attach to an existing terminal
+
+If you already have a terminal tab running something (e.g., a Rails console, a psql session), you can let Claude attach to it.
+
+**Step 1: Wrap your existing terminal tab in tmux**
+
+In your iTerm2 tab, run:
+
+```bash
+npx boring-daemon wrap my-console
+```
+
+This wraps your current shell in a tmux session named `my-console`. Everything continues to work as before — you're just now inside tmux.
+
+**Step 2: Tell Claude to attach**
+
+```
+Attach to my existing terminal session "my-console" and run User.count in it.
+```
+
+Claude will:
+
+1. Call `session_list_all()` — discover available tmux sessions
+2. Call `session_attach(name="console", tmux_session="my-console")`
+3. Call `send_command(session="console", command="User.count")`
+4. Call `wait_for_ready(session="console")` — read the result
+
+**If you're already in tmux**, you don't need the `wrap` command — Claude can attach directly to your session name.
+
 ### A more realistic example
 
 ```
@@ -85,6 +117,22 @@ and tell me the result.
 ```
 
 Claude will create the session, launch psql, wait for the `postgres=>` prompt, run the query, and read the result back.
+
+## CLI commands
+
+The `boring-daemon` CLI helps you wrap existing terminal tabs for Claude to attach to.
+
+```bash
+# Wrap current terminal in a named tmux session
+npx boring-daemon wrap <name>
+
+# Detach from the tmux session (back to plain terminal)
+npx boring-daemon unwrap
+```
+
+After wrapping, tell Claude: `Attach to session "<name>"`.
+
+To detach manually, press `Ctrl-B` then `D`.
 
 ## Manual MCP configuration
 
@@ -108,10 +156,11 @@ If you prefer to configure the MCP server manually instead of using `install.sh`
 
 By default, boring_daemon detects common prompts: `$`, `#`, `>`, `%`, `❯`, `➜` (oh-my-zsh), plus REPL prompts for Ruby (irb/pry), Python, Elixir, MySQL, and PostgreSQL.
 
-Override per-session when creating:
+Override per-session when creating or attaching:
 
 ```
 session_create(name="rails", command="rails console", prompt_pattern="irb.*>")
+session_attach(name="db", tmux_session="psql-prod", prompt_pattern="postgres.*>")
 ```
 
 Or per-call when waiting:
@@ -122,7 +171,7 @@ wait_for_ready(session="rails", prompt_pattern="irb.*>")
 
 ### Log files
 
-All session output is streamed to `~/.boring_daemon/logs/bd-<name>.log`. These persist after sessions close — useful for debugging or auditing what was run.
+All session output is streamed to `~/.boring_daemon/logs/<session>.log`. These persist after sessions close — useful for debugging or auditing what was run.
 
 ## Development
 
@@ -143,18 +192,20 @@ npm run test:integration
 
 ```
 test/
-├── session-manager.unit.test.js         # 36 tests — mocked tmux, pure logic
-└── session-manager.integration.test.js  # 12 tests — real tmux sessions
+├── session-manager.unit.test.js         # 53 tests — mocked tmux, pure logic
+└── session-manager.integration.test.js  # 18 tests — real tmux sessions
 ```
 
 **Unit tests** cover:
 
-- Name prefixing/stripping
+- Name prefixing/stripping and resolution (`_resolve`)
 - ANSI escape code stripping (7 cases)
 - tmux command argument construction
 - Prompt pattern matching (11 prompt formats)
-- Session state management
-- Error handling (dead sessions, missing files)
+- Session create, attach, close lifecycle
+- `listAll` with managed/unmanaged session detection
+- Attached session operations target real tmux name (not `bd-` prefix)
+- Error handling (dead sessions, missing files, nonexistent sessions)
 
 **Integration tests** cover:
 
@@ -164,6 +215,9 @@ test/
 - Raw keystroke sending (Ctrl-C to interrupt)
 - Prompt detection with real shell and custom PS1
 - Multiple concurrent session isolation
+- Attach to external tmux sessions (create outside, attach inside)
+- Send commands and read output from attached sessions
+- `listAll` showing both `bd-` and non-`bd-` sessions
 - Special character handling in commands
 
 ### Running the server directly
@@ -182,13 +236,14 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## Architecture
 
-- **`server.js`** — MCP server entry point. Registers 6 tools with the MCP SDK, delegates to SessionManager.
-- **`session-manager.js`** — Core logic. Manages tmux sessions, output tracking (via `pipe-pane` log files), and prompt detection (polling `capture-pane`).
+- **`server.js`** — MCP server entry point. Registers 8 tools with the MCP SDK, delegates to SessionManager.
+- **`session-manager.js`** — Core logic. Manages tmux sessions (create and attach), output tracking (via `pipe-pane` log files), and prompt detection (polling `capture-pane`).
+- **`cli.js`** — CLI tool (`boring-daemon wrap/unwrap`) for wrapping existing terminal tabs in tmux.
 - **`install.sh`** — Registers the MCP server in `~/.claude.json`.
 
 ### Session naming
 
-All sessions are prefixed with `bd-` to avoid collisions with your own tmux sessions. When using the tools, you use short names (e.g., `prod`) and the prefix is added internally.
+Sessions created by boring_daemon are prefixed with `bd-` to avoid collisions with your own tmux sessions. Attached sessions keep their original tmux name. Internally, `_resolve()` maps the alias you use to the real tmux session name.
 
 ## Troubleshooting
 
@@ -197,6 +252,9 @@ Install tmux: `brew install tmux` or `apt install tmux`.
 
 **Session not detected / tools return errors**
 Make sure tmux server is running. You can check with `tmux list-sessions`.
+
+**Can't attach to a session**
+Use `session_list_all` to see all available tmux sessions. The session name must match exactly. If your terminal tab isn't in tmux yet, wrap it first: `npx boring-daemon wrap <name>`.
 
 **Prompt not detected (wait_for_ready times out)**
 Your shell prompt might not match the default pattern. Pass a custom `prompt_pattern` regex that matches the last line of your prompt. To see what your prompt looks like:

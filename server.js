@@ -16,7 +16,7 @@ const server = new McpServer({
 
 server.tool(
   "session_list",
-  "List all terminal sessions managed by boring_daemon",
+  "List all terminal sessions managed by boring_daemon (created or attached)",
   {},
   async () => {
     const sessions = await manager.list();
@@ -26,11 +26,70 @@ server.tool(
           type: "text",
           text:
             sessions.length === 0
-              ? "No active sessions. Use session_create to start one."
+              ? "No active sessions. Use session_create or session_attach to start one."
               : JSON.stringify(sessions, null, 2),
         },
       ],
     };
+  },
+);
+
+server.tool(
+  "session_list_all",
+  "List ALL tmux sessions on the system (including ones not managed by boring_daemon). Use this to discover existing sessions you can attach to.",
+  {},
+  async () => {
+    const sessions = await manager.listAll();
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            sessions.length === 0
+              ? "No tmux sessions found. The user can create one with: tmux new-session -s <name>"
+              : JSON.stringify(sessions, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  "session_attach",
+  "Attach to an existing tmux session (not created by boring_daemon). Use session_list_all to discover available sessions. After attaching, you can use send_command, read_output, wait_for_ready as normal. The user can also wrap an existing iTerm2 tab with: npx boring-daemon wrap <name>",
+  {
+    name: z.string().describe("Name to refer to this session in boring_daemon"),
+    tmux_session: z
+      .string()
+      .optional()
+      .describe(
+        "Actual tmux session name to attach to (defaults to name if not provided)",
+      ),
+    prompt_pattern: z
+      .string()
+      .optional()
+      .describe("Regex to detect when terminal is ready/idle"),
+  },
+  async ({ name, tmux_session, prompt_pattern }) => {
+    try {
+      const result = await manager.attach(name, {
+        tmuxSession: tmux_session,
+        promptPattern: prompt_pattern,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Attached to tmux session "${result.tmuxName}" as "${name}".\nLog file: ${result.logFile}\nAll tools (send_command, read_output, wait_for_ready) now work with session="${name}".`,
+          },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${e.message}` }],
+        isError: true,
+      };
+    }
   },
 );
 

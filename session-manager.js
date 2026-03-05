@@ -18,7 +18,7 @@ const DEFAULT_PROMPT_PATTERN =
 
 export class SessionManager {
   constructor() {
-    // session name -> { promptPattern, logFile, commandOffset }
+    // session name -> { tmuxName, promptPattern, logFile, commandOffset }
     this.sessions = new Map();
     mkdirSync(LOG_DIR, { recursive: true });
   }
@@ -31,6 +31,14 @@ export class SessionManager {
     return name.startsWith(SESSION_PREFIX)
       ? name.slice(SESSION_PREFIX.length)
       : name;
+  }
+
+  // Resolve the actual tmux session name for a registered session.
+  // Attached sessions store their real tmux name; created sessions use bd- prefix.
+  _resolve(name) {
+    const session = this.sessions.get(name);
+    if (session && session.tmuxName) return session.tmuxName;
+    return this._fullName(name);
   }
 
   _exec(args) {
@@ -78,18 +86,19 @@ export class SessionManager {
   }
 
   async create(name, { command, promptPattern, workingDir } = {}) {
-    const fullName = this._fullName(name);
-    const logFile = this._logPath(fullName);
+    const tmuxName = this._fullName(name);
+    const logFile = this._logPath(tmuxName);
 
-    const args = ["new-session", "-d", "-s", fullName, "-x", "200", "-y", "50"];
+    const args = ["new-session", "-d", "-s", tmuxName, "-x", "200", "-y", "50"];
     if (workingDir) args.push("-c", workingDir);
 
     await this._exec(args);
 
     // Start piping output to log file
-    await this._exec(["pipe-pane", "-t", fullName, `cat >> ${logFile}`]);
+    await this._exec(["pipe-pane", "-t", tmuxName, `cat >> ${logFile}`]);
 
     const session = {
+      tmuxName,
       promptPattern: promptPattern || DEFAULT_PROMPT_PATTERN,
       logFile,
       commandOffset: 0,
@@ -104,8 +113,64 @@ export class SessionManager {
     return { name, logFile, status: "created" };
   }
 
+  async attach(name, { tmuxSession, promptPattern } = {}) {
+    const tmuxName = tmuxSession || name;
+
+    // Verify the tmux session exists
+    try {
+      await this._exec(["has-session", "-t", tmuxName]);
+    } catch {
+      throw new Error(
+        `tmux session "${tmuxName}" not found. Run: tmux list-sessions`,
+      );
+    }
+
+    const logFile = this._logPath(tmuxName);
+
+    // Start piping output to log file
+    await this._exec(["pipe-pane", "-t", tmuxName, `cat >> ${logFile}`]);
+
+    const session = {
+      tmuxName,
+      promptPattern: promptPattern || DEFAULT_PROMPT_PATTERN,
+      logFile,
+      commandOffset: 0,
+    };
+    this.sessions.set(name, session);
+
+    return { name, tmuxName, logFile, status: "attached" };
+  }
+
+  async listAll() {
+    try {
+      const out = await this._exec([
+        "list-sessions",
+        "-F",
+        "#{session_name}|#{session_created}|#{session_windows}|#{session_attached}",
+      ]);
+      return out
+        .trim()
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((line) => {
+          const [name, created, windows, attached] = line.split("|");
+          const managed =
+            this.sessions.has(name) || this.sessions.has(this._shortName(name));
+          return {
+            name,
+            created: new Date(parseInt(created) * 1000).toISOString(),
+            windows: parseInt(windows),
+            attached: attached === "1",
+            managed,
+          };
+        });
+    } catch {
+      return [];
+    }
+  }
+
   async sendCommand(name, command, enter = true) {
-    const fullName = this._fullName(name);
+    const fullName = this._resolve(name);
     const session = this.sessions.get(name);
 
     // Record log offset before command
@@ -129,13 +194,13 @@ export class SessionManager {
   }
 
   async sendKeys(name, keys) {
-    const fullName = this._fullName(name);
+    const fullName = this._resolve(name);
     await this._exec(["send-keys", "-t", fullName, keys]);
     return { sent: true };
   }
 
   async readOutput(name, { lines, sinceLastCommand } = {}) {
-    const fullName = this._fullName(name);
+    const fullName = this._resolve(name);
     const session = this.sessions.get(name);
 
     if (sinceLastCommand && session) {
@@ -166,7 +231,7 @@ export class SessionManager {
       "m",
     );
 
-    const fullName = this._fullName(name);
+    const fullName = this._resolve(name);
     const startTime = Date.now();
     const timeoutMs = timeout * 1000;
 
@@ -212,7 +277,7 @@ export class SessionManager {
   }
 
   async close(name) {
-    const fullName = this._fullName(name);
+    const fullName = this._resolve(name);
     try {
       await this._exec(["kill-session", "-t", fullName]);
     } catch {

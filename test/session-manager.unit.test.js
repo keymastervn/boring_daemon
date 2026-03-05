@@ -35,6 +35,25 @@ describe("SessionManager — unit tests", () => {
     });
   });
 
+  // --- _resolve ---
+
+  describe("_resolve", () => {
+    it("returns tmuxName from session map when registered", () => {
+      manager.sessions.set("myalias", { tmuxName: "real-tmux-name" });
+      assert.equal(manager._resolve("myalias"), "real-tmux-name");
+    });
+
+    it("falls back to _fullName when not registered", () => {
+      assert.equal(manager._resolve("unknown"), "bd-unknown");
+    });
+
+    it("returns bd- prefixed name for created sessions", async () => {
+      manager._exec = mock.fn(async () => "");
+      await manager.create("created");
+      assert.equal(manager._resolve("created"), "bd-created");
+    });
+  });
+
   // --- _logPath ---
 
   describe("_logPath", () => {
@@ -195,6 +214,194 @@ describe("SessionManager — unit tests", () => {
       await manager.create("custom", { promptPattern: "myapp>" });
       const sess = manager.sessions.get("custom");
       assert.equal(sess.promptPattern, "myapp>");
+    });
+  });
+
+  // --- attach (mocked) ---
+
+  describe("attach", () => {
+    it("verifies session exists with has-session", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.attach("alias", { tmuxSession: "my-rails-console" });
+      assert.deepEqual(calls[0], ["has-session", "-t", "my-rails-console"]);
+    });
+
+    it("sets up pipe-pane for logging", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.attach("alias", { tmuxSession: "existing" });
+      assert.equal(calls[1][0], "pipe-pane");
+      assert.equal(calls[1][2], "existing");
+    });
+
+    it("stores tmuxName as the real session name (no bd- prefix)", async () => {
+      manager._exec = mock.fn(async () => "");
+      await manager.attach("myalias", { tmuxSession: "production-rails" });
+
+      const sess = manager.sessions.get("myalias");
+      assert.equal(sess.tmuxName, "production-rails");
+    });
+
+    it("uses name as tmuxSession when tmuxSession not provided", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.attach("my-session");
+      assert.deepEqual(calls[0], ["has-session", "-t", "my-session"]);
+    });
+
+    it("throws when tmux session does not exist", async () => {
+      manager._exec = mock.fn(async (args) => {
+        if (args[0] === "has-session") throw new Error("session not found");
+        return "";
+      });
+
+      await assert.rejects(
+        () => manager.attach("bad", { tmuxSession: "nope" }),
+        {
+          message: /tmux session "nope" not found/,
+        },
+      );
+    });
+
+    it("returns expected shape", async () => {
+      manager._exec = mock.fn(async () => "");
+      const result = await manager.attach("alias", { tmuxSession: "real" });
+      assert.equal(result.name, "alias");
+      assert.equal(result.tmuxName, "real");
+      assert.equal(result.status, "attached");
+      assert.match(result.logFile, /real\.log$/);
+    });
+
+    it("uses custom promptPattern", async () => {
+      manager._exec = mock.fn(async () => "");
+      await manager.attach("r", {
+        tmuxSession: "rails",
+        promptPattern: "irb>",
+      });
+      assert.equal(manager.sessions.get("r").promptPattern, "irb>");
+    });
+  });
+
+  // --- listAll (mocked) ---
+
+  describe("listAll", () => {
+    it("returns all sessions including non-bd ones", async () => {
+      manager._exec = mock.fn(async () => {
+        return [
+          "bd-prod|1709640000|1|0",
+          "my-rails|1709640000|1|1",
+          "user-session|1709641000|2|0",
+        ].join("\n");
+      });
+      const result = await manager.listAll();
+      assert.equal(result.length, 3);
+      assert.equal(result[0].name, "bd-prod");
+      assert.equal(result[1].name, "my-rails");
+      assert.equal(result[2].name, "user-session");
+    });
+
+    it("marks managed sessions", async () => {
+      manager._exec = mock.fn(async () => "");
+      await manager.create("prod"); // registers as "prod" → tmuxName "bd-prod"
+
+      manager._exec = mock.fn(async () => {
+        return "bd-prod|1709640000|1|0\nother|1709640000|1|0\n";
+      });
+      const result = await manager.listAll();
+      const bdProd = result.find((s) => s.name === "bd-prod");
+      const other = result.find((s) => s.name === "other");
+      assert.equal(bdProd.managed, true);
+      assert.equal(other.managed, false);
+    });
+
+    it("returns empty array when no tmux server", async () => {
+      manager._exec = mock.fn(async () => {
+        throw new Error("no server");
+      });
+      const result = await manager.listAll();
+      assert.deepEqual(result, []);
+    });
+  });
+
+  // --- operational methods use _resolve for attached sessions ---
+
+  describe("attached session operations", () => {
+    beforeEach(async () => {
+      manager._exec = mock.fn(async () => "");
+      await manager.attach("rails", { tmuxSession: "my-rails-console" });
+    });
+
+    it("sendCommand targets real tmux name", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.sendCommand("rails", "User.count");
+      assert.deepEqual(calls[0], [
+        "send-keys",
+        "-t",
+        "my-rails-console",
+        "-l",
+        "User.count",
+      ]);
+    });
+
+    it("readOutput targets real tmux name", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "output\n";
+      });
+
+      await manager.readOutput("rails");
+      assert.deepEqual(calls[0], [
+        "capture-pane",
+        "-t",
+        "my-rails-console",
+        "-p",
+      ]);
+    });
+
+    it("sendKeys targets real tmux name", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.sendKeys("rails", "C-c");
+      assert.deepEqual(calls[0], [
+        "send-keys",
+        "-t",
+        "my-rails-console",
+        "C-c",
+      ]);
+    });
+
+    it("close kills the real tmux session", async () => {
+      const calls = [];
+      manager._exec = mock.fn(async (args) => {
+        calls.push(args);
+        return "";
+      });
+
+      await manager.close("rails");
+      assert.deepEqual(calls[0], ["kill-session", "-t", "my-rails-console"]);
     });
   });
 
