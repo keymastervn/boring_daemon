@@ -14,7 +14,9 @@ Claude Code ←── stdio MCP ──→ boring_daemon (Node.js)
                                     └── tmux pipe-pane    → stream to log file
 ```
 
-Claude gets 8 tools:
+Claude gets 12 tools:
+
+**Session management**
 
 | Tool               | Description                                                       |
 | ------------------ | ----------------------------------------------------------------- |
@@ -26,6 +28,15 @@ Claude gets 8 tools:
 | `send_keys`        | Send raw keystrokes (Ctrl-C, y/n, arrow keys)                     |
 | `read_output`      | Read the current screen or output since last command              |
 | `wait_for_ready`   | Block until the prompt reappears, then return all output          |
+
+**Recording & replay**
+
+| Tool           | Description                                                             |
+| -------------- | ----------------------------------------------------------------------- |
+| `record_start` | Begin recording all tool calls to a JSONL file                          |
+| `record_stop`  | Finalise the recording and return the file path                         |
+| `record_event` | Append a custom event mid-recording (e.g. an `LLM_TURN` reasoning step) |
+| `replay`       | Re-execute a recording verbatim (`auto`) or with LLM review (`hybrid`)  |
 
 ## Use cases
 
@@ -118,6 +129,61 @@ and tell me the result.
 
 Claude will create the session, launch psql, wait for the `postgres=>` prompt, run the query, and read the result back.
 
+## Recording & Replay
+
+Record a session once, then replay it deterministically — useful for automation scripts that need reliable, repeatable execution instead of free-form prompting.
+
+### Record a session
+
+```
+Start recording as "count-users".
+[Call record_start with session="count-users"]
+
+Now create a session "db", run psql, query SELECT count(*) FROM users, and close.
+[Claude works through the task — every tool call is auto-recorded]
+
+Before each reasoning step, log an LLM_TURN event with record_event.
+[Call record_event with type="LLM_TURN", data={model, prompt, response}]
+
+Stop recording.
+[Call record_stop]
+```
+
+The recording is saved to `~/.boring_daemon/record_logs/count-users-<timestamp>.jsonl`.
+
+### JSONL format
+
+Each file is a stream of JSON lines:
+
+```jsonl
+{"type":"header","schema_version":"1.0","session":"count-users","start":"2026-04-22T16:20:00Z","recorder":"boring-daemon"}
+{"type":"session_create","idx":1,"ts":"...","session":"db","params":{"command":"psql -h localhost mydb"}}
+{"type":"wait_for_ready","idx":2,"ts":"...","session":"db","params":{"timeout":30},"result":{"ready":true,"elapsed":1.2}}
+{"type":"LLM_TURN","idx":3,"ts":"...","model":"claude-sonnet-4-6","prompt":"run the count query","response":"I'll run SELECT count(*)..."}
+{"type":"send_command","idx":4,"ts":"...","session":"db","params":{"command":"SELECT count(*) FROM users;","enter":true}}
+{"type":"wait_for_ready","idx":5,"ts":"...","session":"db","params":{"timeout":30},"result":{"ready":true,"elapsed":0.8}}
+{"type":"session_close","idx":6,"ts":"...","session":"db"}
+{"type":"footer","end":"2026-04-22T16:25:00Z","total_events":6,"session":"count-users"}
+```
+
+### Replay a recording
+
+**Auto mode** — executes all tool events verbatim; `LLM_TURN` events are skipped:
+
+```
+Replay ~/.boring_daemon/record_logs/count-users-2026-04-22T16-20-00.jsonl in auto mode.
+[Call replay with file=..., mode="auto"]
+```
+
+**Hybrid mode** — same as auto, but `LLM_TURN` events are surfaced in the replay output so you can review the original prompt and decide whether to adjust before continuing:
+
+```
+Replay count-users-....jsonl in hybrid mode.
+[Call replay with file=..., mode="hybrid"]
+```
+
+The replay returns a log entry per event with `status: ok | skipped | llm_turn | error`.
+
 ## CLI commands
 
 The `boring-daemon` CLI helps you manage terminal sessions.
@@ -201,11 +267,14 @@ npm run test:integration
 
 ```
 test/
-├── session-manager.unit.test.js         # 53 tests — mocked tmux, pure logic
-└── session-manager.integration.test.js  # 18 tests — real tmux sessions
+├── session-manager.unit.test.js         # 76 tests — mocked tmux, pure logic
+├── session-manager.integration.test.js  # 18 tests — real tmux sessions
+├── recorder.unit.test.js                # 26 tests — Recorder class, JSONL correctness
+├── replayer.unit.test.js                # 24 tests — replay routing (mock manager)
+└── recording.integration.test.js        # 10 tests — full record→replay with real tmux
 ```
 
-**Unit tests** cover:
+**Session manager unit tests** cover:
 
 - Name prefixing/stripping and resolution (`_resolve`)
 - ANSI escape code stripping (7 cases)
@@ -216,7 +285,7 @@ test/
 - Attached session operations target real tmux name (not `bd-` prefix)
 - Error handling (dead sessions, missing files, nonexistent sessions)
 
-**Integration tests** cover:
+**Session manager integration tests** cover:
 
 - Full session lifecycle (create → list → close)
 - Command execution and output capture
@@ -228,6 +297,39 @@ test/
 - Send commands and read output from attached sessions
 - `listAll` showing both `bd-` and non-`bd-` sessions
 - Special character handling in commands
+
+**Recorder unit tests** cover:
+
+- Initial state, `start()`, `append()`, `stop()` lifecycle
+- File creation, header structure, footer structure
+- Sequential `idx` assignment and ISO `ts` on every event
+- Field spreading (nested `params`, `result`, `meta`, arbitrary keys)
+- Guard: throws if already recording; throws on `stop()` with no active session
+- Idempotent start→stop→start cycle
+- Full JSONL correctness (every line parseable)
+
+**Replayer unit tests** cover:
+
+- File validation: empty file, missing header, malformed JSON
+- Event routing for all 7 tool types (mock manager, captures args)
+- `enter` default (true) when absent from recorded params
+- `since_last_command` / `lines` translation to `sinceLastCommand`
+- Auto mode: `LLM_TURN` skipped, unknown types skipped with reason
+- Hybrid mode: `LLM_TURN` surfaced with `prompt` and `hint`; tool events still execute
+- Error handling: throws on first failure with `idx` and type; aborts subsequent events
+- Return value shape: `header`, `mode`, `log[]` with `idx`/`type`/`status` per entry
+
+**Recording integration tests** cover:
+
+- File lands in `~/.boring_daemon/record_logs/` with correct naming
+- Real session tool calls produce correct JSONL (header → events → footer)
+- `LLM_TURN` events captured via `record_event` pattern
+- Two concurrent `Recorder` instances write to separate files without interference
+- Auto replay: creates real tmux session, runs command, closes — all events `ok`
+- Auto replay: `LLM_TURN` events appear as `skipped` in log
+- Hybrid replay: `LLM_TURN` events appear as `llm_turn` with prompt/hint; tools still run
+- Replay log `idx` and `type` match the original recording
+- Replay aborts with descriptive error on bad session reference
 
 ### Running the server directly
 
@@ -245,8 +347,10 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ## Architecture
 
-- **`server.js`** — MCP server entry point. Registers 8 tools with the MCP SDK, delegates to SessionManager.
+- **`server.js`** — MCP server entry point. Registers 12 tools with the MCP SDK, delegates to SessionManager and Recorder.
 - **`session-manager.js`** — Core logic. Manages tmux sessions (create and attach), output tracking (via `pipe-pane` log files), and prompt detection (polling `capture-pane`).
+- **`recorder.js`** — Singleton `Recorder` class. Streams tool-call events to a JSONL file line-by-line as they happen (crash-safe, no buffering).
+- **`replayer.js`** — `replay(filePath, manager, {mode})` function. Reads a JSONL recording and re-executes events against a live `SessionManager`.
 - **`cli.js`** — CLI tool (`boring-daemon wrap/unwrap`) for wrapping existing terminal tabs in tmux.
 - **`install.sh`** — Registers the MCP server in `~/.claude.json`.
 

@@ -300,33 +300,20 @@ export class SessionManager {
       }
 
       if (shellIdle || replReady) {
-        // Terminal is ready — return output since last command
-        let output = "";
-        if (session) {
-          try {
-            const content = readFileSync(session.logFile, "utf-8");
-            output = content.slice(session.commandOffset);
-          } catch {
-            const screen = await this._exec([
-              "capture-pane",
-              "-t",
-              fullName,
-              "-p",
-            ]);
-            output = screen.trimEnd();
-          }
-        } else {
-          const screen = await this._exec([
-            "capture-pane",
-            "-t",
-            fullName,
-            "-p",
-          ]);
-          output = screen.trimEnd();
-        }
+        // Use capture-pane for output — reads from tmux's in-memory display
+        // buffer, which is always current. The log file (written via pipe-pane
+        // → cat) may lag due to OS pipe buffering and is unreliable here.
+        const screen = await this._exec([
+          "capture-pane",
+          "-t",
+          fullName,
+          "-p",
+          "-S",
+          "-200",
+        ]);
         return {
           ready: true,
-          output: this._stripAnsi(output),
+          output: this._stripAnsi(screen.trimEnd()),
           elapsed: Math.round((Date.now() - startTime) / 1000),
         };
       }
