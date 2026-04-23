@@ -1,6 +1,6 @@
 {
   "name": "boring-daemon",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "MCP server for terminal control — send commands, read output, wait for readiness",
   "main": "server.js",
   "type": "module",

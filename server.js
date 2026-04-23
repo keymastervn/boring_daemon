@@ -4,12 +4,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { SessionManager } from "./session-manager.js";
+import { recorder } from "./recorder.js";
+import { replay as replayRecording } from "./replayer.js";
 
 const manager = new SessionManager();
 
 const server = new McpServer({
   name: "boring-daemon",
-  version: "0.2.1",
+  version: "0.3.0",
 });
 
 // --- Tools ---
@@ -76,6 +78,11 @@ server.tool(
         tmuxSession: tmux_session,
         promptPattern: prompt_pattern,
       });
+      recorder.append({
+        type: "session_attach",
+        session: name,
+        params: { tmux_session, prompt_pattern },
+      });
       return {
         content: [
           {
@@ -119,6 +126,11 @@ server.tool(
         promptPattern: prompt_pattern,
         workingDir: working_dir,
       });
+      recorder.append({
+        type: "session_create",
+        session: name,
+        params: { command, prompt_pattern, working_dir },
+      });
       return {
         content: [
           {
@@ -157,6 +169,11 @@ CRITICAL: You MUST send commands EXACTLY as the user wrote them, character-for-c
   async ({ session, command, enter }) => {
     try {
       await manager.sendCommand(session, command, enter);
+      recorder.append({
+        type: "send_command",
+        session,
+        params: { command, enter },
+      });
       return {
         content: [
           {
@@ -186,6 +203,7 @@ server.tool(
   async ({ session, keys }) => {
     try {
       await manager.sendKeys(session, keys);
+      recorder.append({ type: "send_keys", session, params: { keys } });
       return {
         content: [{ type: "text", text: `Keys sent to "${session}": ${keys}` }],
       };
@@ -218,6 +236,12 @@ server.tool(
       const output = await manager.readOutput(session, {
         lines,
         sinceLastCommand: since_last_command,
+      });
+      recorder.append({
+        type: "read_output",
+        session,
+        params: { lines, since_last_command },
+        result: output,
       });
       return {
         content: [{ type: "text", text: output || "(empty)" }],
@@ -252,6 +276,12 @@ server.tool(
         timeout,
         promptPattern: prompt_pattern,
       });
+      recorder.append({
+        type: "wait_for_ready",
+        session,
+        params: { timeout, prompt_pattern },
+        result: { ready: result.ready, elapsed: result.elapsed },
+      });
       const status = result.ready
         ? `Ready (${result.elapsed}s)`
         : `Timed out (${result.elapsed}s)`;
@@ -281,9 +311,188 @@ server.tool(
   async ({ session }) => {
     try {
       await manager.close(session);
+      recorder.append({ type: "session_close", session });
       return {
         content: [{ type: "text", text: `Session "${session}" closed.` }],
       };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${e.message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// --- Recording tools ---
+
+server.tool(
+  "record_start",
+  `Start recording all boring-daemon tool calls to a JSONL file.
+Every subsequent send_command, send_keys, wait_for_ready, read_output, session_create, session_attach, and session_close call will be appended as a structured event.
+
+Use record_event to log LLM reasoning turns (LLM_TURN) or any other custom events mid-recording.
+Call record_stop to finalise the file.
+
+File is written to: ~/.boring_daemon/record_logs/<session>-<timestamp>.jsonl`,
+  {
+    session: z
+      .string()
+      .describe(
+        "Label for this recording (used in the filename and as the session identifier in the log)",
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe("Human-readable description of what this recording does"),
+  },
+  async ({ session, description }) => {
+    try {
+      const filePath = recorder.start(session, { description });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Recording started.\nSession label: ${session}\nFile: ${filePath}\n\nAll tool calls will be recorded until record_stop is called.`,
+          },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${e.message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "record_stop",
+  "Stop the active recording and finalise the JSONL file. Returns the file path and event count.",
+  {},
+  async () => {
+    try {
+      const { filePath, totalEvents, session } = recorder.stop();
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Recording stopped.\nSession: ${session}\nEvents recorded: ${totalEvents}\nFile: ${filePath}`,
+          },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${e.message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "record_event",
+  `Append a custom event to the active recording. Use this to log LLM reasoning turns and other non-tool events.
+
+Common usage — log an LLM turn before acting on a user prompt:
+  type: "LLM_TURN", data: { model: "claude-sonnet-4-6", prompt: "<user message>", response: "<your plan>" }
+
+The type field can be any string. Known special types:
+  LLM_TURN  — a user prompt handed to the LLM agent, with optional model/response fields
+  NOTE      — a free-form human annotation
+
+No-ops silently if no recording is active.`,
+  {
+    type: z
+      .string()
+      .describe('Event type (e.g. "LLM_TURN", "NOTE", or any custom string)'),
+    data: z
+      .record(z.unknown())
+      .describe("Arbitrary key-value payload for this event"),
+  },
+  async ({ type, data }) => {
+    if (!recorder.isRecording()) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No active recording. Event not saved. Call record_start first.",
+          },
+        ],
+      };
+    }
+    recorder.append({ type, ...data });
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Event recorded: ${type}`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  "replay",
+  `Replay a boring-daemon recording from a JSONL file.
+
+Modes:
+  auto   — executes all tool events (send_command, send_keys, wait_for_ready, etc.) verbatim
+            in sequence. LLM_TURN events are skipped.
+  hybrid — same as auto, but LLM_TURN events are surfaced in the replay log so you can
+            review the original prompt and decide whether to adjust subsequent commands
+            before the replay continues.
+
+The replay uses the current live session manager, so sessions created during replay are
+real tmux sessions you can attach to.
+
+Returns a structured log of every event: status ok | skipped | llm_turn | error.`,
+  {
+    file: z
+      .string()
+      .describe(
+        "Absolute path to the .jsonl recording file (e.g. ~/.boring_daemon/record_logs/my-session-2026-04-22T16-20-00.jsonl)",
+      ),
+    mode: z
+      .enum(["auto", "hybrid"])
+      .optional()
+      .default("auto")
+      .describe(
+        "auto: execute all tool events, skip LLM turns. hybrid: surface LLM turns for review.",
+      ),
+  },
+  async ({ file, mode }) => {
+    try {
+      const expandedFile = file.startsWith("~")
+        ? file.replace("~", process.env.HOME || "")
+        : file;
+      const { header, log } = await replayRecording(expandedFile, manager, {
+        mode,
+      });
+
+      const ok = log.filter((e) => e.status === "ok").length;
+      const skipped = log.filter((e) => e.status === "skipped").length;
+      const llmTurns = log.filter((e) => e.status === "llm_turn").length;
+      const errors = log.filter((e) => e.status === "error").length;
+
+      const summary = [
+        `Replay complete — ${header.session} (${mode} mode)`,
+        `  ok: ${ok}  skipped: ${skipped}  llm_turns: ${llmTurns}  errors: ${errors}`,
+        "",
+        "Event log:",
+        ...log.map((e) => {
+          const base = `  [${String(e.idx).padStart(3)}] ${e.type} → ${e.status}`;
+          if (e.status === "llm_turn")
+            return `${base}\n        prompt: ${e.prompt}\n        ${e.hint}`;
+          if (e.status === "error") return `${base}: ${e.error}`;
+          if (e.status === "skipped" && e.reason)
+            return `${base} (${e.reason})`;
+          return base;
+        }),
+      ].join("\n");
+
+      return { content: [{ type: "text", text: summary }] };
     } catch (e) {
       return {
         content: [{ type: "text", text: `Error: ${e.message}` }],
