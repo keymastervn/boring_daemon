@@ -58,7 +58,7 @@ Claude gets 12 tools:
 
 ```bash
 cd ~/tmp/boring_daemon
-npm install
+npm install --global
 ```
 
 ### 2. Register with your AI coding tool
