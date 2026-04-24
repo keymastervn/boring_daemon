@@ -407,7 +407,8 @@ No-ops silently if no recording is active.`,
       .string()
       .describe('Event type (e.g. "LLM_TURN", "NOTE", or any custom string)'),
     data: z
-      .record(z.unknown())
+      .object({})
+      .passthrough()
       .describe("Arbitrary key-value payload for this event"),
   },
   async ({ type, data }) => {
