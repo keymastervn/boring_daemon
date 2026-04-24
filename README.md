@@ -61,13 +61,23 @@ cd ~/tmp/boring_daemon
 npm install
 ```
 
-### 2. Register with Claude Code
+### 2. Register with your AI coding tool
+
+**Claude Code:**
 
 ```bash
-./install.sh
+./scripts/claude_install.sh
 ```
 
 This adds `boring-daemon` to your `~/.claude.json` MCP server config. Restart Claude Code after running this.
+
+**OpenCode:**
+
+```bash
+./scripts/opencode_install.sh
+```
+
+This adds `boring-daemon` to your `~/.config/opencode/config.json`. Restart OpenCode after running this.
 
 ### 3. Try it out — new session
 
@@ -211,7 +221,9 @@ To detach manually, press `Ctrl-B` then `D`.
 
 ## Manual MCP configuration
 
-If you prefer to configure the MCP server manually instead of using `install.sh`, add this to your `~/.claude.json`:
+If you prefer to configure the MCP server manually instead of using the install scripts, add this to your `~/.claude.json` (Claude Code) or `~/.config/opencode/config.json` (OpenCode):
+
+**Claude Code** (`~/.claude.json`):
 
 ```json
 {
@@ -220,6 +232,19 @@ If you prefer to configure the MCP server manually instead of using `install.sh`
       "command": "node",
       "args": ["/full/path/to/boring_daemon/server.js"],
       "type": "stdio"
+    }
+  }
+}
+```
+
+**OpenCode** (`~/.config/opencode/config.json`):
+
+```json
+{
+  "mcp": {
+    "boring-daemon": {
+      "type": "local",
+      "command": ["node", "/full/path/to/boring_daemon/server.js"]
     }
   }
 }
@@ -352,7 +377,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 - **`recorder.js`** — Singleton `Recorder` class. Streams tool-call events to a JSONL file line-by-line as they happen (crash-safe, no buffering).
 - **`replayer.js`** — `replay(filePath, manager, {mode})` function. Reads a JSONL recording and re-executes events against a live `SessionManager`.
 - **`cli.js`** — CLI tool (`boring-daemon wrap/unwrap`) for wrapping existing terminal tabs in tmux.
-- **`install.sh`** — Registers the MCP server in `~/.claude.json`.
+- **`scripts/claude_install.sh`** — Registers the MCP server in `~/.claude.json` (Claude Code).
+- **`scripts/opencode_install.sh`** — Registers the MCP server in `~/.config/opencode/config.json` (OpenCode).
 
 ### Session naming
 
